@@ -12,12 +12,18 @@ import actionlib
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 import actionlib_msgs
 import numpy as np
+import math
+from tf import TransformListener
+from geometry_msgs.msg import PointStamped
 
 # color definition
 RED   = 1
 GREEN = 2
 BLUE  = 3
 camera_preview = True
+
+camera_horizon = 70
+camera_height = 640
 
 class MyRobot():
     def __init__(self):
@@ -40,6 +46,30 @@ class MyRobot():
         self.client = actionlib.SimpleActionClient('move_base',MoveBaseAction)
         # mode
         self.mode = 0
+
+    def setGoal(self,x,y,yaw):
+        self.client.wait_for_server()
+
+        goal = MoveBaseGoal()
+        goal.target_pose.header.frame_id = self.name + "/map"
+        goal.target_pose.header.stamp = rospy.Time.now()
+        goal.target_pose.pose.position.x = x
+        goal.target_pose.pose.position.y = y
+
+        # Euler to Quartanion
+        q=tf.transformations.quaternion_from_euler(0,0,yaw)        
+        goal.target_pose.pose.orientation.x = q[0]
+        goal.target_pose.pose.orientation.y = q[1]
+        goal.target_pose.pose.orientation.z = q[2]
+        goal.target_pose.pose.orientation.w = q[3]
+
+        self.client.send_goal(goal)
+        wait = self.client.wait_for_result()
+        if not wait:
+            rospy.logerr("Action server not available!")
+            rospy.signal_shutdown("Action server not available!")
+        else:
+            return self.client.get_result()
 
     def lidarCallback(self, data):
         self.scan = data
@@ -84,35 +114,38 @@ class MyRobot():
             print(e)
         frame = self.img
         # 水平がx軸、垂直がy軸 rects = [x,y,height,width]
-        rects = self.find_rect_of_target_color(frame, RED)
+        #rects = self.find_rect_of_target_color(frame, RED)
+        rects = self.find_rect_of_target_color(frame,GREEN)
         print(rects)
+        if len(rects) != 0:
+            self.mode = 1
+            # robot正面から何度の方向に緑の物体が存在するか計算
+            green_angle = (camera_horizon / camera_height) * (rects[0] - (camera_height / 2))
+            # rectの大きさまで考慮する必要ありか？
+            # lidarの点群からおおよその距離を算出
+            distance = self.scan.ranges[int(180-green_angle)]
+            # robotから見た座標値を算出
+            robot_x = math.cos(math.radians(green_angle)) * distance
+            robot_y = math.sin(math.radians(green_angle)) * distance
+            # 自己の姿勢に相手ロボットの方向を足す(tf)
+            listener = tf.TransformListener()
+            # Revise
+            listener.waitForTransform("robot","map",rospy.Time(0),rospy.Duration(4.0))
+            laser_point = PointStamped()
+            laser_point.header.frame_id = "robot"
+            laser_point.header.stamp = rospy.Time(0)
+            laser_point.point.x = robot_x
+            laser_point.point.y = robot_y
+            laser_point.point.z = 0.0
+            p = PointStamped()
+            p = listener.transformPoint("map", laser_point)
+            # 方向と位置をゴールとして指定
+            # 一旦方向は無視して位置でデバッグ
+            self.setGoal(p.point.x,p.point.y,0)
+
         if self.camera_preview:
             cv2.imshow("Image window", self.img)
             cv2.waitKey(1)
-
-    def setGoal(self,x,y,yaw):
-        self.client.wait_for_server()
-
-        goal = MoveBaseGoal()
-        goal.target_pose.header.frame_id = self.name + "/map"
-        goal.target_pose.header.stamp = rospy.Time.now()
-        goal.target_pose.pose.position.x = x
-        goal.target_pose.pose.position.y = y
-
-        # Euler to Quartanion
-        q=tf.transformations.quaternion_from_euler(0,0,yaw)        
-        goal.target_pose.pose.orientation.x = q[0]
-        goal.target_pose.pose.orientation.y = q[1]
-        goal.target_pose.pose.orientation.z = q[2]
-        goal.target_pose.pose.orientation.w = q[3]
-
-        self.client.send_goal(goal)
-        wait = self.client.wait_for_result()
-        if not wait:
-            rospy.logerr("Action server not available!")
-            rospy.signal_shutdown("Action server not available!")
-        else:
-            return self.client.get_result()
 
     def basic_move(self):
         self.setGoal(-0.5,0,0)
